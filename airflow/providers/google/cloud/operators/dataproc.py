@@ -981,14 +981,23 @@ class DataprocJobBaseOperator(BaseOperator):
         else:
             raise AirflowException("Create a job template before")
 
-    def on_kill(self):
+    def on_kill(self, cancel_on_kill: bool = True, job_id: Optional = None):
         """
         Callback called when the operator is killed.
         Cancel any running job.
+
+        Parameters:
+            cancel_on_kill (bool): Cancel job if true, defaults to True
+            job_id (job_id): Job ID to cancel, defaults to property dataproc_job_id
         """
-        if self.dataproc_job_id:
+        if not cancel_on_kill:
+            return
+        cancel_job_id = self.dataproc_job_id
+        if job_id:
+            cancel_job_id = job_id
+        if cancel_job_id:
             self.hook.cancel_job(
-                project_id=self.project_id, job_id=self.dataproc_job_id, location=self.region
+                project_id=self.project_id, job_id=cancel_job_id, location=self.region
             )
 
 
@@ -1773,6 +1782,9 @@ class DataprocSubmitJobOperator(BaseOperator):
         This is useful for submitting long running jobs and
         waiting on them asynchronously using the DataprocJobSensor
     :type asynchronous: bool
+    :param hook: Optional instance of DataprocHook
+    :type hook: DataprocHook
+    :param job_id: Optional job_id
     """
 
     template_fields = ('project_id', 'location', 'job', 'impersonation_chain')
@@ -1791,6 +1803,8 @@ class DataprocSubmitJobOperator(BaseOperator):
         gcp_conn_id: str = "google_cloud_default",
         impersonation_chain: Optional[Union[str, Sequence[str]]] = None,
         asynchronous: bool = False,
+        hook: Optional[DataprocHook] = None,
+        job_id: Optional = None,
         **kwargs,
     ) -> None:
         super().__init__(**kwargs)
@@ -1804,11 +1818,14 @@ class DataprocSubmitJobOperator(BaseOperator):
         self.gcp_conn_id = gcp_conn_id
         self.impersonation_chain = impersonation_chain
         self.asynchronous = asynchronous
+        self.hook = hook
+        self.job_id = job_id
 
     def execute(self, context: Dict):
         self.log.info("Submitting job")
-        hook = DataprocHook(gcp_conn_id=self.gcp_conn_id, impersonation_chain=self.impersonation_chain)
-        job_object = hook.submit_job(
+        if not self.hook:
+            self.hook = DataprocHook(gcp_conn_id=self.gcp_conn_id, impersonation_chain=self.impersonation_chain)
+        job_object = self.hook.submit_job(
             project_id=self.project_id,
             location=self.location,
             job=self.job,
@@ -1817,15 +1834,34 @@ class DataprocSubmitJobOperator(BaseOperator):
             timeout=self.timeout,
             metadata=self.metadata,
         )
-        job_id = job_object.reference.job_id
-        self.log.info('Job %s submitted successfully.', job_id)
+        self.job_id = job_object.reference.job_id
+        self.log.info('Job %s submitted successfully.', self.job_id)
 
         if not self.asynchronous:
-            self.log.info('Waiting for job %s to complete', job_id)
-            hook.wait_for_job(job_id=job_id, location=self.location, project_id=self.project_id)
-            self.log.info('Job %s completed successfully.', job_id)
+            self.log.info('Waiting for job %s to complete', self.job_id)
+            self.hook.wait_for_job(job_id=self.job_id, location=self.location, project_id=self.project_id)
+            self.log.info('Job %s completed successfully.', self.job_id)
 
-        return job_id
+        return self.job_id
+
+    def on_kill(self, cancel_on_kill: bool = True, job_id: Optional = None):
+        """
+        Callback called when the operator is killed.
+        Cancel any running job.
+
+        Parameters:
+            cancel_on_kill (bool): Cancel job if true, defaults to True
+            job_id (job_id): Job ID to cancel, defaults to property job_id
+        """
+        if not cancel_on_kill:
+            return
+        cancel_job_id = self.job_id
+        if job_id:
+            cancel_job_id = job_id
+        if cancel_job_id:
+            self.hook.cancel_job(
+                project_id=self.project_id, job_id=cancel_job_id, location=self.location
+            )
 
 
 class DataprocUpdateClusterOperator(BaseOperator):
